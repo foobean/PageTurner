@@ -37,8 +37,10 @@ import android.graphics.*;
 import com.google.inject.Inject;
 import net.nightwhistler.htmlspanner.FontFamily;
 import net.nightwhistler.htmlspanner.HtmlSpanner;
+import net.nightwhistler.htmlspanner.SpanStack;
 import net.nightwhistler.htmlspanner.TagNodeHandler;
 import net.nightwhistler.htmlspanner.handlers.TableHandler;
+import net.nightwhistler.htmlspanner.handlers.WrappingHandler;
 import net.nightwhistler.htmlspanner.spans.CenterSpan;
 import net.nightwhistler.pageturner.Configuration;
 import net.nightwhistler.pageturner.R;
@@ -774,11 +776,12 @@ public class BookView extends ScrollView {
 	 * @author Alex Kuiper
 	 * 
 	 */
-	private class AnchorHandler extends TagNodeHandler {
+	private class AnchorHandler extends WrappingHandler {
 
 		private TagNodeHandler wrappedHandler;
 
 		public AnchorHandler(TagNodeHandler wrappedHandler) {
+            super(wrappedHandler);
 			this.wrappedHandler = wrappedHandler;
 		}
 		
@@ -789,14 +792,14 @@ public class BookView extends ScrollView {
 
 		@Override
 		public void handleTagNode(TagNode node, SpannableStringBuilder builder,
-				int start, int end) {
+				int start, int end, SpanStack spanStack) {
 
 			String id = node.getAttributeByName("id");
 			if (id != null) {
 				anchors.put(id, start);
 			}
 
-			wrappedHandler.handleTagNode(node, builder, start, end);
+			super.handleTagNode(node, builder, start, end, spanStack);
 		}
 	}
 
@@ -822,7 +825,7 @@ public class BookView extends ScrollView {
 
 		@Override
 		public void handleTagNode(TagNode node, SpannableStringBuilder builder,
-				int start, int end) {
+				int start, int end, SpanStack spanStack) {
 
 			String href = node.getAttributeByName("href");
 
@@ -835,8 +838,7 @@ public class BookView extends ScrollView {
 			// First check if it should be a normal URL link
 			for (String protocol : this.externalProtocols) {
 				if (href.toLowerCase(Locale.US).startsWith(protocol)) {
-					builder.setSpan(new URLSpan(href), start, end,
-							Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+					spanStack.pushSpan( new URLSpan(href), start, end );
 					return;
 				}
 			}
@@ -850,8 +852,7 @@ public class BookView extends ScrollView {
 				}
 			};
 
-			builder.setSpan(span, start, end,
-					Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            spanStack.pushSpan(span, start, end);
 		}
 	}
 
@@ -1028,7 +1029,7 @@ public class BookView extends ScrollView {
 		@TargetApi(Build.VERSION_CODES.FROYO)
 		@Override
 		public void handleTagNode(TagNode node, SpannableStringBuilder builder,
-				int start, int end) {
+				int start, int end, SpanStack span) {
 			String src = node.getAttributeByName("src");
 
 			if (src == null) {
