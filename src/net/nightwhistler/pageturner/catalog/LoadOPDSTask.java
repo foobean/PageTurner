@@ -18,15 +18,11 @@
  */
 package net.nightwhistler.pageturner.catalog;
 
-import static net.nightwhistler.pageturner.catalog.Catalog.getImageLink;
-
-import java.io.InputStream;
-import java.net.URL;
-import java.util.*;
-
-import android.app.Activity;
-import com.actionbarsherlock.app.SherlockActivity;
-import com.actionbarsherlock.app.SherlockFragmentActivity;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.DialogInterface.OnCancelListener;
+import android.util.Log;
+import com.google.inject.Inject;
 import net.nightwhistler.nucular.atom.AtomConstants;
 import net.nightwhistler.nucular.atom.Entry;
 import net.nightwhistler.nucular.atom.Feed;
@@ -35,41 +31,28 @@ import net.nightwhistler.nucular.parser.Nucular;
 import net.nightwhistler.nucular.parser.opensearch.SearchDescription;
 import net.nightwhistler.pageturner.Configuration;
 import net.nightwhistler.pageturner.R;
-
+import net.nightwhistler.pageturner.scheduling.QueueableAsyncTask;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpGet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import android.annotation.TargetApi;
-import android.app.Dialog;
-import android.content.Context;
-import android.content.DialogInterface;
-import android.content.DialogInterface.OnCancelListener;
-import android.os.AsyncTask;
-import android.os.Build;
-import android.util.Base64;
+import java.io.InputStream;
+import java.net.URL;
 
-import com.google.inject.Inject;
-
-public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
-		OnCancelListener {
+public class LoadOPDSTask extends QueueableAsyncTask<String, Object, Feed> {
 	
 	private static final Logger LOG = LoggerFactory.getLogger("LoadOPDSTask");
 
 	private Configuration config;
-
 	private Context context;
 
 	private HttpClient httpClient;
-	
-	private Entry previousEntry;
-	private boolean isBaseFeed;
+
 	private LoadFeedCallback callBack;
 	
 	private String errorMessage;
-		
 	private boolean asDetailsFeed;
 
     private LoadFeedCallback.ResultType resultType;
@@ -86,38 +69,40 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
         callBack.onLoadingStart();
 	}
 
-	@Override
-	public void onCancel(DialogInterface dialog) {
-		this.cancel(true);
-	}
+    @Override
+    public void requestCancellation() {
+        LOG.debug("Got cancel request");
+        super.requestCancellation();
+    }
 
-	@TargetApi(Build.VERSION_CODES.FROYO)
-	@Override
+    @Override
 	protected Feed doInBackground(String... params) {
 
 		String baseUrl = params[0];
-
-		this.isBaseFeed = baseUrl.equals(config.getBaseOPDSFeed());
 
 		if (baseUrl == null || baseUrl.trim().length() == 0) {
 			return null;
 		}
 
+        boolean isBaseFeed = baseUrl.equals(config.getBaseOPDSFeed());
+
 		baseUrl = baseUrl.trim();
 
 		try {			
 
-            HttpGet get = new HttpGet(baseUrl);
-            get.setHeader("User-Agent", config.getUserAgent() );
-            get.setHeader("Accept-Language", config.getLocale().getLanguage());
-			HttpResponse response = httpClient.execute(get);
-			
+            HttpGet currentRequest = new HttpGet(baseUrl);
+            currentRequest.setHeader("User-Agent", config.getUserAgent() );
+            currentRequest.setHeader("Accept-Language", config.getLocale().getLanguage());
+			HttpResponse response = httpClient.execute(currentRequest);
+
+            LOG.debug("Starting download of " + baseUrl );
+
 			if ( response.getStatusLine().getStatusCode() != 200 ) {
 				this.errorMessage = "HTTP " + response.getStatusLine().getStatusCode() + ": " + response.getStatusLine().getReasonPhrase();
 				return null;
 			}
-			
-			InputStream stream = response.getEntity().getContent();			
+
+			InputStream stream = response.getEntity().getContent();
 			Feed feed = Nucular.readAtomFeedFromStream(stream);
             feed.setURL(baseUrl);
 			feed.setDetailFeed(asDetailsFeed);
@@ -125,37 +110,10 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
             if (isBaseFeed) {
                 addCustomSitesEntry(feed);
             }
-			
-			List<Link> remoteImages = new ArrayList<Link>();
 
-			for (final Entry entry : feed.getEntries()) {
-
-				if (isCancelled()) {
-					return feed;
-				}
-
-				Link imageLink = getImageLink(feed, entry);
-
-				if (imageLink != null) {
-					String href = imageLink.getHref();
-
-					// If the image is contained in the feed, load it
-					// directly
-					if (href.startsWith("data:image/png;base64")) {
-						String dataString = href
-								.substring(href.indexOf(',') + 1);
-						if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.FROYO) {
-							imageLink.setBinData(Base64.decode(dataString,
-									Base64.DEFAULT));
-						} else {
-							// Slight hack for Android 2.1
-							imageLink.setBinData(null);
-						}
-					} else {
-						remoteImages.add(imageLink);
-					}
-				}
-			}
+            if ( isCancelled() ) {
+                return null;
+            }
 
 			Link searchLink = feed.findByRel(AtomConstants.REL_SEARCH);
 
@@ -166,8 +124,9 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
 
 				if (AtomConstants.TYPE_OPENSEARCH.equals(searchLink.getType())) {
 					String searchURL = searchLink.getHref();
-					
-					InputStream searchStream = httpClient.execute(new HttpGet(searchURL)).getEntity().getContent();
+
+                    currentRequest = new HttpGet(searchURL);
+					InputStream searchStream = httpClient.execute(currentRequest).getEntity().getContent();
 					
 					SearchDescription desc = Nucular
 							.readOpenSearchFromStream(searchStream);
@@ -178,14 +137,6 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
 					}
 
 				}
-			}
-
-			publishProgress(feed);
-
-			Map<String, byte[]> cache = new HashMap<String, byte[]>();
-			for (Link link : remoteImages) {
-				Catalog.loadImageLink(httpClient, cache, link, baseUrl);
-				publishProgress(link);
 			}
 
 			return feed;
@@ -206,24 +157,18 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
 		return this;
 	}
 	
-	public LoadOPDSTask setPreviousEntry(Entry previousEntry) {
-		this.previousEntry = previousEntry;
-		return this;
-	}
-	
 	public void setAsDetailsFeed(boolean asDetailsFeed) {
 		this.asDetailsFeed = asDetailsFeed;
 	}
-	
-	@Override
-	protected void onPostExecute(Feed result) {
 
-        callBack.onLoadingDone();
-
+    @Override
+    protected void doOnPostExecute(Feed result) {
 		if (result == null) {
 			callBack.errorLoadingFeed(errorMessage);
 		}  else if ( result.getSize() == 0 ) {
             callBack.errorLoadingFeed( context.getString(R.string.empty_opds_feed) );
+        } else {
+            callBack.setNewFeed(result, resultType);
         }
 	}
 
@@ -242,23 +187,6 @@ public class LoadOPDSTask extends AsyncTask<String, Object, Feed> implements
         }
 
 		feed.addEntry(entry);
-	}
-
-	@Override
-	protected void onProgressUpdate(Object... values) {
-		
-		if (values == null || values.length == 0) {
-			return;
-		}
-
-		Object val = values[0];
-
-		if (val instanceof Feed) {
-			Feed result = (Feed) val;
-			callBack.setNewFeed(result, resultType);
-		} else if (val instanceof Link) {
-			callBack.notifyLinkUpdated();
-		}
 	}
 
 }

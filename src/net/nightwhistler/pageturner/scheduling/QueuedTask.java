@@ -17,28 +17,36 @@
  * along with PageTurner.  If not, see <http://www.gnu.org/licenses/>.*
  */
 
-package net.nightwhistler.pageturner.library;
+package net.nightwhistler.pageturner.scheduling;
 
 import android.os.AsyncTask;
 import net.nightwhistler.pageturner.PlatformUtil;
 
+/**
+ * Wraps a QueueableAsyncTask and its parameters, so that it can be executed later.
+ *
+ * It's essentially a simple Command Object for tasks.
+ *
+ * @param <A>
+ * @param <B>
+ * @param <C>
+ */
 public class QueuedTask<A, B, C> {
 
-    private AsyncTask<A, B, C> task;
+    private QueueableAsyncTask<A, B, C> task;
     private A[] parameters;
 
-    public QueuedTask(AsyncTask<A,B,C> task, A[] params ) {
+    public QueuedTask(QueueableAsyncTask<A,B,C> task, A[] params ) {
         this.task = task;
         this.parameters = params;
     }
-
 
     public void execute() {
         PlatformUtil.executeTask(task, parameters);
     }
 
     public void cancel() {
-        this.task.cancel(true);
+        this.task.requestCancellation();
     }
 
     public AsyncTask<A,B,C> getTask() {

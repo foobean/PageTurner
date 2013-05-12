@@ -22,12 +22,12 @@ import java.io.File;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLEncoder;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Stack;
+import java.util.*;
 
 import javax.annotation.Nullable;
 
+import android.os.Build;
+import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.widget.*;
 import com.actionbarsherlock.app.SherlockFragmentActivity;
@@ -43,6 +43,7 @@ import net.nightwhistler.pageturner.activity.*;
 import net.nightwhistler.pageturner.catalog.DownloadFileTask.DownloadFileCallback;
 import net.nightwhistler.pageturner.library.LibraryService;
 
+import net.nightwhistler.pageturner.scheduling.TaskQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,8 +69,10 @@ import com.github.rtyley.android.sherlock.roboguice.fragment.RoboSherlockFragmen
 import com.google.inject.Inject;
 import com.google.inject.Provider;
 
+import static net.nightwhistler.pageturner.catalog.Catalog.getImageLink;
+
 public class CatalogFragment extends RoboSherlockFragment implements
-		LoadFeedCallback, DialogFactory.SearchCallBack {
+		LoadFeedCallback, DialogFactory.SearchCallBack, TaskQueue.TaskQueueListener {
 	
     private static final String STATE_NAV_ARRAY_KEY = "nav_array";    
 
@@ -92,6 +95,12 @@ public class CatalogFragment extends RoboSherlockFragment implements
 	private Provider<LoadOPDSTask> loadOPDSTaskProvider;
 
     @Inject
+    private Provider<ParseBinDataTask> parseBinDataTaskProvider;
+
+    @Inject
+    private Provider<LoadThumbnailTask> loadThumbnailTaskProvider;
+
+    @Inject
     private DialogFactory dialogFactory;
 	
     @Inject
@@ -99,6 +108,9 @@ public class CatalogFragment extends RoboSherlockFragment implements
 
     @Inject
     private Provider<DisplayMetrics> metricsProvider;
+
+    @Inject
+    private TaskQueue taskQueue;
 
     private MenuItem searchMenuItem;
 
@@ -115,6 +127,7 @@ public class CatalogFragment extends RoboSherlockFragment implements
         DisplayMetrics metrics = metricsProvider.get();
         getActivity().getWindowManager().getDefaultDisplay().getMetrics(metrics);
 
+        this.taskQueue.setTaskQueueListener(this);
         int displayDensity = metrics.densityDpi;
         this.adapter.setDisplayDensity(displayDensity);
         LOG.debug("Metrics at init: " + displayDensity );
@@ -139,9 +152,13 @@ public class CatalogFragment extends RoboSherlockFragment implements
 
 		return false;		
 	}
-	
 
-	@Override
+    @Override
+    public void queueEmpty() {
+        onLoadingDone();
+    }
+
+    @Override
 	public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
 		return inflater.inflate(R.layout.fragment_catalog, container, false);
 	}
@@ -173,10 +190,19 @@ public class CatalogFragment extends RoboSherlockFragment implements
 		task.setCallBack(this);
 
         task.setResultType(resultType);
-		task.setPreviousEntry(entry);	
 		task.setAsDetailsFeed(asDetailsFeed);
+
+        //If we're going to load a completely new feed,
+        //cancel all pending downloads.
+        if ( resultType == ResultType.REPLACE ) {
+            taskQueue.clear();
+            taskQueue.executeTask(task, url);
+        } else {
+            taskQueue.jumpQueueExecuteTask(task, url);
+            this.adapter.setLoading(true);
+        }
 		
-		task.execute(url);
+
 	}	
 
 	@Override
@@ -453,14 +479,52 @@ public class CatalogFragment extends RoboSherlockFragment implements
                 adapter.setFeed(result);
                 ((CatalogParent) getActivity() ).onFeedReplaced(result);
             } else {
+                this.adapter.setLoading(false);
                 adapter.addEntriesFromFeed(result);
             }
 
             getSherlockActivity().supportInvalidateOptionsMenu();
             getSherlockActivity().getSupportActionBar().setTitle(result.getTitle());
+
+            queueImageLoading(result);
+        }
+    }
+
+    private void queueImageLoading( Feed feed ) {
+
+        Map<String, byte[]> cache = new HashMap<String, byte[]>();
+
+        for (final Entry entry : feed.getEntries()) {
+
+            Link imageLink = getImageLink(feed, entry);
+
+            if (imageLink != null) {
+                String href = imageLink.getHref();
+
+                // If the image is contained in the feed, load it
+                // directly
+                if (href.startsWith("data:image/png;base64")) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.FROYO) {
+                        ParseBinDataTask binDataTask = this.parseBinDataTaskProvider.get();
+                        binDataTask.setLoadFeedCallback(this);
+
+                        taskQueue.executeTask(binDataTask, imageLink);
+                    }
+                }else {
+
+                    LoadThumbnailTask thumbnailTask = this.loadThumbnailTaskProvider.get();
+                    thumbnailTask.setCache(cache);
+                    thumbnailTask.setBaseUrl( feed.getURL() );
+                    thumbnailTask.setLoadFeedCallback(this);
+
+                    taskQueue.executeTask(thumbnailTask, imageLink);
+                }
+            }
         }
 
+        cache.clear();
     }
+
 
     private void setSupportProgressBarIndeterminateVisibility(boolean enable) {
         SherlockFragmentActivity activity = getSherlockActivity();
@@ -493,12 +557,15 @@ public class CatalogFragment extends RoboSherlockFragment implements
         @Override
         public void onScroll(AbsListView view, int firstVisibleItem, int visibleItemCount, int totalItemCount) {
 
-            if ( totalItemCount - (firstVisibleItem + visibleItemCount) <= LOAD_THRESHOLD && adapter.getCount() > 0) {
+            int lastVisibleItem = firstVisibleItem + visibleItemCount;
+
+            if ( totalItemCount - lastVisibleItem  <= LOAD_THRESHOLD && adapter.getCount() > 0) {
 
                 Entry lastEntry = adapter.getItem( adapter.getCount() -1 );
                 Feed feed = lastEntry.getFeed();
 
                 if ( feed == null || feed.getNextLink() == null) {
+                    LOG.debug("Scroll down detected, but no next link available");
                     return;
                 }
 

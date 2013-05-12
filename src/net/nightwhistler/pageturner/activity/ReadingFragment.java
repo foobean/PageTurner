@@ -27,7 +27,6 @@ import java.util.*;
 import android.content.res.AssetFileDescriptor;
 import android.widget.*;
 import com.actionbarsherlock.app.SherlockFragmentActivity;
-import com.hlidskialf.android.hardware.ShakeListener;
 import net.nightwhistler.htmlspanner.HtmlSpanner;
 import net.nightwhistler.htmlspanner.spans.CenterSpan;
 import net.nightwhistler.pageturner.Configuration;
@@ -55,6 +54,7 @@ import net.nightwhistler.pageturner.view.ProgressListAdapter;
 import net.nightwhistler.pageturner.view.SearchResultAdapter;
 import net.nightwhistler.pageturner.view.bookview.BookView;
 import net.nightwhistler.pageturner.view.bookview.BookViewListener;
+import net.nightwhistler.pageturner.view.bookview.TextLoader;
 import net.nightwhistler.pageturner.view.bookview.TextSelectionCallback;
 import nl.siegmann.epublib.domain.Author;
 import nl.siegmann.epublib.domain.Book;
@@ -96,7 +96,6 @@ import android.os.PowerManager;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.TextToSpeech.OnUtteranceCompletedListener;
 import android.telephony.TelephonyManager;
-import android.text.InputType;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.util.DisplayMetrics;
@@ -113,7 +112,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.animation.Animation;
-import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 
 import com.actionbarsherlock.view.Menu;
@@ -121,6 +119,8 @@ import com.actionbarsherlock.view.MenuInflater;
 import com.actionbarsherlock.view.MenuItem;
 import com.github.rtyley.android.sherlock.roboguice.fragment.RoboSherlockFragment;
 import com.google.inject.Inject;
+
+import static net.nightwhistler.pageturner.PlatformUtil.isIntentAvailable;
 
 public class ReadingFragment extends RoboSherlockFragment implements
 		BookViewListener, TextSelectionCallback, OnUtteranceCompletedListener,
@@ -171,7 +171,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	private RelativeLayout titleBarLayout;
 		
 	@InjectView(R.id.mediaPlayerLayout)
-	private RelativeLayout mediaLayout;
+	private LinearLayout mediaLayout;
 
 	@InjectView(R.id.titleProgress)
 	private SeekBar progressBar;
@@ -202,6 +202,9 @@ public class ReadingFragment extends RoboSherlockFragment implements
 
     @InjectView(R.id.prevButton)
     private ImageButton prevButton;
+
+    @InjectView(R.id.wordView)
+    private TextView wordView;
 	
 	@Inject
 	private TelephonyManager telephonyManager;
@@ -214,6 +217,9 @@ public class ReadingFragment extends RoboSherlockFragment implements
 
     @Inject
     private TTSPlaybackQueue ttsPlaybackItemQueue;
+
+    @Inject
+    private TextLoader textLoader;
 
     private com.actionbarsherlock.widget.SearchView searchView;
 
@@ -304,28 +310,28 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		this.progressBar.setFocusable(true);
 		this.progressBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
 
-			private int seekValue;
+            private int seekValue;
 
-			@Override
-			public void onStopTrackingTouch(SeekBar seekBar) {
-				bookView.navigateToPercentage(this.seekValue);
-			}
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                bookView.navigateToPercentage(this.seekValue);
+            }
 
-			@Override
-			public void onStartTrackingTouch(SeekBar seekBar) {
-			}
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
 
-			@Override
-			public void onProgressChanged(SeekBar seekBar,
-					int progress, boolean fromUser) {
-				if (fromUser) {
-					seekValue = progress;
-					percentageField.setText(progress + "% ");
-				}
-			}
-		});
+            @Override
+            public void onProgressChanged(SeekBar seekBar,
+                                          int progress, boolean fromUser) {
+                if (fromUser) {
+                    seekValue = progress;
+                    percentageField.setText(progress + "% ");
+                }
+            }
+        });
 
-        this.mediaProgressBar.setOnSeekBarChangeListener( new SeekBar.OnSeekBarChangeListener() {
+        this.mediaProgressBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
@@ -356,8 +362,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		this.bookView.setConfiguration(config);
 
 		this.bookView.addListener(this);
-		this.bookView.setSpanner(RoboGuice.getInjector(getActivity()).getInstance(
-				HtmlSpanner.class));
+
 	}
 	
 	private void seekToPointInPlayback(int position) {
@@ -458,6 +463,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		
 		this.viewSwitcher.setOnTouchListener(gestureListener);
 		this.bookView.setOnTouchListener(gestureListener);
+        this.dummyView.setOnTouchListener(gestureListener);
 		
 		registerForContextMenu(bookView);
 		saveConfigState();
@@ -593,7 +599,19 @@ public class ReadingFragment extends RoboSherlockFragment implements
         playBeep(false);
 
 		File fos = new File( config.getTTSFolder() );
+
+        if ( fos.exists() && ! fos.isDirectory() ) {
+            fos.delete();
+        }
+
         fos.mkdir();
+
+        if ( ! (fos.exists() && fos.isDirectory() )  ) {
+            String message = "\"Failed to create folder \" + fos.getAbsolutePath() ";
+            LOG.error("Failed to create folder " + fos.getAbsolutePath() );
+            showTTSFailed("Failed to create folder " + fos.getAbsolutePath() );
+            return;
+        }
 
         saveReadingPosition();
 		//Delete any old TTS files still present.
@@ -613,7 +631,8 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		this.waitDialog.setTitle(R.string.init_tts);
 		this.waitDialog.show();
 
-        backgroundHandler.post(new StreamToDiskRunnable());
+        //backgroundHandler.post(new StreamToDiskRunnable());
+        new Thread( new StreamToDiskRunnable() ).start();
 	}
 
     private class StreamToDiskRunnable implements Runnable {
@@ -627,10 +646,16 @@ public class ReadingFragment extends RoboSherlockFragment implements
             }
 
             File ttsFolder = new File( config.getTTSFolder() );
-            String textToSpeak = text.toString().substring( bookView.getPosition() );
+            String textToSpeak = text.toString().substring( bookView.getStartOfCurrentPage() );
 
-            String[] parts = textToSpeak.split("\\.|\n");
-            int offset = bookView.getPosition();
+            textToSpeak = textToSpeak.replace( "\n", "~" );
+            textToSpeak = textToSpeak.replace( ".", ".~" );
+            textToSpeak = textToSpeak.replace( "?", "?~" );
+            textToSpeak = textToSpeak.replace( "!", "!~" );
+
+            String[] parts = textToSpeak.split("\\~");
+
+            int offset = bookView.getStartOfCurrentPage();
 
             try {
                 for ( int i=0; i < parts.length && ttsIsRunning(); i++ ) {
@@ -642,16 +667,38 @@ public class ReadingFragment extends RoboSherlockFragment implements
                     boolean lastPart = i == parts.length -1;
 
                     //Utterance ID doubles as the filename
-                    String pageName = new File( ttsFolder, "tts_" + Integer.toHexString( part.hashCode()) + ".wav").getAbsolutePath();
+                    String pageName = new File( ttsFolder, "tts_" + UUID.randomUUID() + ".wav").getAbsolutePath();
                     streamPartToDisk(pageName, part, offset, textToSpeak.length(), lastPart);
 
                     offset += part.length() +1;
 
+                    Thread.yield();
                 }
             } catch (TTSFailedException e) {
                 //Just stop streaming
             }
         }
+    }
+
+    private void showTTSFailed(final String message) {
+        uiHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                stopTextToSpeech(true);
+                waitDialog.hide();
+
+				playBeep(true);
+                if ( getActivity() != null ) {
+
+                    StringBuilder textBuilder = new StringBuilder( getActivity().getString(R.string.tts_failed) );
+                    textBuilder.append("\n").append(message);
+
+	                Toast.makeText(getActivity(), textBuilder.toString(), Toast.LENGTH_SHORT).show();
+                }
+
+
+            }
+        } );
     }
 
     /** Checked exception to indicate TTS failure **/
@@ -660,7 +707,9 @@ public class ReadingFragment extends RoboSherlockFragment implements
     private void streamPartToDisk(String fileName, String part, int offset, int totalLength, boolean endOfPage )
         throws TTSFailedException {
 
-        if ( part.trim().length() > 0 ) {
+        LOG.debug("Request to stream text to file " + fileName + " with text " + part );
+
+        if ( part.trim().length() > 0 || endOfPage ) {
 
             HashMap<String, String> params = new HashMap<String, String>();
 
@@ -669,23 +718,15 @@ public class ReadingFragment extends RoboSherlockFragment implements
             TTSPlaybackItem item = new TTSPlaybackItem( part, new MediaPlayer(), totalLength, offset, endOfPage, fileName);
             ttsItemPrep.put(fileName, item);
 
-            if ( textToSpeech.synthesizeToFile(part, params, fileName) != TextToSpeech.SUCCESS ) {
-
-                uiHandler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        stopTextToSpeech(true);
-                        waitDialog.hide();
-
-                        playBeep(true);
-                        if ( getActivity() != null ) {
-                            Toast.makeText(getActivity(), R.string.tts_failed, Toast.LENGTH_SHORT).show();
-                        }
-                    }
-                } );
-
+            int result = textToSpeech.synthesizeToFile(part, params, fileName);
+            if ( result != TextToSpeech.SUCCESS ) {
+                String message = "synthesizeToFile failed with result " + result;
+                LOG.error(message);
+                showTTSFailed(message);
                 throw new TTSFailedException();
             }
+        } else {
+            LOG.debug("Skipping part, since it's empty.");
         }
     }
 	
@@ -736,7 +777,8 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	
 	private Runnable progressBarUpdater = new Runnable() {
 		public void run() {
-			
+
+
 			int phoneState = telephonyManager.getCallState();
 	    
 			if ( phoneState == TelephonyManager.CALL_STATE_RINGING || 
@@ -767,6 +809,8 @@ public class ReadingFragment extends RoboSherlockFragment implements
                         int currentDuration = item.getOffset() + (int) (percentage * item.getText().length());
 
                         bookView.navigateTo(bookView.getIndex(), currentDuration );
+
+                        wordView.setText( item.getText() );
 
                     }
                 }
@@ -834,20 +878,24 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	
 	private void startPlayback() {
 
+        LOG.debug("startPlayback() - doing peek()");
+
         final TTSPlaybackItem item = this.ttsPlaybackItemQueue.peek();
 
         if ( item == null ) {
+            LOG.debug("Got null item, bailing out.");
 			return;
 		}
 
-        LOG.debug("Start playback for item " + item.getFileName() );
+        LOG.debug("Start playback for item " + item.getFileName());
+        LOG.debug("Text: '" + item.getText() + "'");
 		
 		if ( item.getMediaPlayer().isPlaying() ) {
 			return;
 		}
 
         item.setOnSpeechCompletedCallback(this);
-        uiHandler.post( progressBarUpdater );
+        uiHandler.post(progressBarUpdater);
 		item.getMediaPlayer().start();
 
 	}
@@ -958,9 +1006,10 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		int marginH = config.getHorizontalMargin();
 		int marginV = config.getVerticalMargin();
 
+        this.textLoader.setFontFamily(config.getDefaultFontFamily());
 		this.bookView.setFontFamily(config.getDefaultFontFamily());
-		this.bookView.setSansSerifFontFamily(config.getSansSerifFontFamily());
-		this.bookView.setSerifFontFamily(config.getSerifFontFamily());
+		this.textLoader.setSansSerifFontFamily(config.getSansSerifFontFamily());
+		this.textLoader.setSerifFontFamily(config.getSerifFontFamily());
 
 		bookView.setHorizontalMargin(marginH);
 		bookView.setVerticalMargin(marginV);
@@ -969,7 +1018,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 			bookView.setEnableScrolling(config.isScrollingEnabled());
 		}
 
-		bookView.setStripWhiteSpace(config.isStripWhiteSpaceEnabled());
+		textLoader.setStripWhiteSpace(config.isStripWhiteSpaceEnabled());
 		bookView.setLineSpacing(config.getLineSpacing());
 
 		if (config.isFullScreenEnabled()) {
@@ -1038,6 +1087,9 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	private void restartActivity() {
 
 		onStop();
+
+        //Clear any cached text.
+        textLoader.closeCurrentBook();
 		Intent intent = new Intent(getActivity(), ReadingActivity.class);
 		intent.setData(Uri.parse(this.fileName));
 		startActivity(intent);
@@ -1190,7 +1242,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	public void lookupWikipedia(String text) {
 
 		openBrowser("http://" + getLanguageCode() + ".wikipedia.org/wiki/Special:Search?search="
-				+ URLEncoder.encode(text));
+                + URLEncoder.encode(text));
 	}
 
     public void lookupWiktionary(String text) {
@@ -1220,13 +1272,6 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		Intent i = new Intent(Intent.ACTION_VIEW);
 		i.setData(Uri.parse(url));
 		startActivity(i);
-	}
-
-	public static boolean isIntentAvailable(Context context, Intent intent) {
-		final PackageManager packageManager = context.getPackageManager();
-		List<ResolveInfo> list = packageManager.queryIntentActivities(intent,
-				PackageManager.MATCH_DEFAULT_ONLY);
-		return list.size() > 0;
 	}
 
 	private void restoreColorProfile() {
@@ -1923,7 +1968,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 		if (this.bookView != null) {
 
 			int index = this.bookView.getIndex();
-			int position = this.bookView.getPosition();
+			int position = this.bookView.getProgressPosition();
 			
 			if ( index != -1 && position != -1 ) {			
 				config.setLastPosition(this.fileName, position);
@@ -2065,7 +2110,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	@Override
 	public void onScreenTap() {
 
-		stopAnimating();				
+       stopAnimating();
 
 		if (this.titleBarLayout.getVisibility() == View.VISIBLE) {
 			titleBarLayout.setVisibility(View.GONE);
@@ -2290,7 +2335,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 	@Override
 	public void onSaveInstanceState(final Bundle outState) {
 		if (this.bookView != null) {
-			outState.putInt(POS_KEY, this.bookView.getPosition());
+			outState.putInt(POS_KEY, this.bookView.getProgressPosition());
 			outState.putInt(IDX_KEY, this.bookView.getIndex());
 		}
 
@@ -2525,7 +2570,7 @@ public class ReadingFragment extends RoboSherlockFragment implements
 			waitDialog.hide();
 
 			int index = bookView.getIndex();
-			int pos = bookView.getPosition();
+			int pos = bookView.getProgressPosition();
 
 			if (progress != null) {
 

@@ -22,6 +22,8 @@ import java.io.File;
 import java.text.DateFormat;
 import java.util.*;
 
+import android.content.ActivityNotFoundException;
+import android.widget.*;
 import com.actionbarsherlock.app.SherlockFragmentActivity;
 import com.actionbarsherlock.widget.SearchView;
 import net.nightwhistler.htmlspanner.HtmlSpanner;
@@ -33,6 +35,7 @@ import net.nightwhistler.pageturner.PlatformUtil;
 import net.nightwhistler.pageturner.R;
 import net.nightwhistler.pageturner.library.CleanFilesTask;
 import net.nightwhistler.pageturner.library.*;
+import net.nightwhistler.pageturner.scheduling.*;
 import net.nightwhistler.pageturner.view.BookCaseView;
 import net.nightwhistler.pageturner.view.FastBitmapDrawable;
 
@@ -58,18 +61,8 @@ import android.os.Handler;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.AbsListView;
-import android.widget.AdapterView;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.AdapterView.OnItemLongClickListener;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.ImageView;
-import android.widget.ListView;
-import android.widget.RadioButton;
-import android.widget.TextView;
-import android.widget.ViewSwitcher;
 
 import com.actionbarsherlock.app.ActionBar;
 import com.actionbarsherlock.app.ActionBar.OnNavigationListener;
@@ -80,8 +73,12 @@ import com.actionbarsherlock.view.MenuItem.OnMenuItemClickListener;
 import com.github.rtyley.android.sherlock.roboguice.fragment.RoboSherlockFragment;
 import com.google.inject.Inject;
 
+import static net.nightwhistler.pageturner.PlatformUtil.isIntentAvailable;
+
 public class LibraryFragment extends RoboSherlockFragment implements ImportCallback, OnItemClickListener,
-        OnItemLongClickListener, DialogFactory.SearchCallBack {
+        OnItemLongClickListener, DialogFactory.SearchCallBack, TaskQueue.TaskQueueListener {
+
+    protected static final int REQUEST_CODE_GET_CONTENT = 2;
 	
 	@Inject 
 	private LibraryService libraryService;
@@ -109,6 +106,9 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 	@Inject
 	private Configuration config;
 
+    @Inject
+    private TaskQueue taskQueue;
+
 	private Drawable backupCover;
 	private Handler handler;
 		
@@ -133,8 +133,6 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 
     private MenuItem searchMenuItem;
 
-    private Queue<QueuedTask<?,?,?>> taskQueue = new LinkedList<QueuedTask<?, ?, ?>>();
-	
 	private interface IntentCallBack {
 		void onResult( int resultCode, Intent data );
 	}
@@ -151,12 +149,15 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 		if ( savedInstanceState != null ) {
 			this.askedUserToImport = savedInstanceState.getBoolean("import_q", false);
 		}
+
+        this.taskQueue.setTaskQueueListener(this);
 	}
 
 	@Override
 	public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
 		return inflater.inflate(R.layout.fragment_library, container, false);
 	}
+
 
 	@Override
 	public void onViewCreated(View view, Bundle savedInstanceState) {
@@ -212,7 +213,17 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
                 true), new File(config.getLibraryFolder()) );
 	}
 
-	private void clearCoverCache() {
+    private <A,B,C> void executeTask( QueueableAsyncTask<A,B,C> task, A... parameters ) {
+        setSupportProgressBarIndeterminateVisibility(true);
+        this.taskQueue.executeTask(task, parameters);
+    }
+
+    @Override
+    public void queueEmpty() {
+        setSupportProgressBarIndeterminateVisibility(false);
+    }
+
+    private void clearCoverCache() {
 		for ( Map.Entry<String, FastBitmapDrawable> draw: coverCache.entrySet() ) {
 			draw.getValue().destroy();
 		}
@@ -340,54 +351,6 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
         executeTask( importTask, startFolder );
 	}
 
-    private <A,B,C> void executeTask( AsyncTask<A,B,C> task, A... parameters ) {
-
-        setSupportProgressBarIndeterminateVisibility(true);
-
-        this.taskQueue.add(new QueuedTask<A, B, C>(task, parameters));
-        LOG.debug( "Scheduled task of type " + task.getClass().getSimpleName()
-                + " total tasks scheduled now: " + this.taskQueue.size() );
-
-        if ( this.taskQueue.size() == 1 ) {
-            this.taskQueue.peek().execute();
-        }
-    }
-
-
-    @Override
-    public void taskCompleted(AsyncTask<?, ?, ?> task, boolean wasCancelled) {
-
-        if ( ! wasCancelled ) {
-            QueuedTask queuedTask = this.taskQueue.remove();
-
-            if ( queuedTask.getTask() != task ) {
-                throw new RuntimeException("Tasks out of sync! Expected "+
-                        queuedTask.getTask() + " but got " + task );
-            }
-
-            LOG.debug( "Completion of task of type " + task.getClass().getSimpleName()
-                    + " total tasks scheduled now: " + this.taskQueue.size() );
-
-            if ( ! this.taskQueue.isEmpty() ) {
-                this.taskQueue.peek().execute();
-            }
-        }
-
-        if ( this.taskQueue.isEmpty() ) {
-            setSupportProgressBarIndeterminateVisibility(false);
-        }
-
-    }
-
-    public void clearTaskQueue() {
-
-        LOG.debug("Clearing task queue.");
-
-        if ( ! this.taskQueue.isEmpty() ) {
-            taskQueue.peek().cancel();
-            this.taskQueue.clear();
-        }
-    }
 
     @Override
 	public void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -520,7 +483,54 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
             }
         }
 
+
+        // Only show open file item if we have a file manager installed
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("file/*");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+
+        if (isIntentAvailable(getActivity(), intent)) {
+            menu.findItem(R.id.open_file).setOnMenuItemClickListener(new OnMenuItemClickListener() {
+                @Override
+                public boolean onMenuItemClick(MenuItem item) {
+                    launchFileManager();
+                    return true;
+                }
+            });
+        } else {
+            menu.findItem(R.id.open_file).setVisible(false);
+        }
+
 	}
+
+    private void launchFileManager() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("file/*");
+
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+
+        this.intentCallBack = new IntentCallBack() {
+
+            @Override
+            public void onResult(int resultCode, Intent data) {
+                if ( resultCode == Activity.RESULT_OK && data != null ) {
+                    Intent readingIntent = new Intent( getActivity(), ReadingActivity.class);
+                    readingIntent.setData(data.getData());
+                    getActivity().setResult(Activity.RESULT_OK, readingIntent);
+
+                    getActivity().startActivityIfNeeded(readingIntent, 99);
+                }
+            }
+        };
+
+        try {
+            startActivityForResult(intent, REQUEST_CODE_GET_CONTENT);
+        } catch (ActivityNotFoundException e) {
+            // No compatible file manager was found.
+            Toast.makeText(getActivity(), getString(R.string.install_oi),
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
 
     public void onSearchRequested() {
         if ( this.searchMenuItem != null && searchMenuItem.getActionView() != null ) {
@@ -651,7 +661,7 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 		this.bookAdapter.clear();
 		//We clear the list to free up memory.
 
-        this.clearTaskQueue();
+        this.taskQueue.clear();
 		this.clearCoverCache();
 		
 		super.onPause();
@@ -842,7 +852,7 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 
     private void loadView( LibrarySelection selection, String from ) {
         LOG.debug("Loading view: " + selection + " from " + from);
-        clearTaskQueue();
+        this.taskQueue.clear();
         executeTask(new LoadBooksTask(selection));
     }
 
@@ -1181,7 +1191,7 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 
     }
 
-	private class LoadBooksTask extends AsyncTask<String, Integer, QueryResult<LibraryBook>> {
+	private class LoadBooksTask extends QueueableAsyncTask<String, Integer, QueryResult<LibraryBook>> {
 		
 		private Configuration.LibrarySelection sel;
         private String filter;
@@ -1236,11 +1246,10 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
 			}
 			
 			throw new RuntimeException( "Failed after 3 attempts", storedException ); 
-		}		
-		
-		
-		@Override
-		protected void onPostExecute(QueryResult<LibraryBook> result) {
+		}
+
+        @Override
+        protected void doOnPostExecute(QueryResult<LibraryBook> result) {
 			 loadQueryData(result);
 
             if (filter == null && sel == Configuration.LibrarySelection.LAST_ADDED && result.getSize() == 0 && ! askedUserToImport ) {
@@ -1248,8 +1257,6 @@ public class LibraryFragment extends RoboSherlockFragment implements ImportCallb
                 buildImportQuestionDialog();
                 importQuestion.show();
             }
-
-            taskCompleted(this, isCancelled());
 		}
 		
 	}
