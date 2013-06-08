@@ -19,19 +19,19 @@
 
 package net.nightwhistler.pageturner.view.bookview;
 
-import java.util.ArrayList;
-import java.util.List;
-
-import net.nightwhistler.pageturner.Configuration;
-import net.nightwhistler.pageturner.epub.PageTurnerSpine;
 import android.graphics.Canvas;
 import android.text.Spanned;
 import android.text.SpannedString;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.widget.TextView;
+import net.nightwhistler.pageturner.Configuration;
+import net.nightwhistler.pageturner.epub.PageTurnerSpine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class FixedPagesStrategy implements PageChangeStrategy {
 
@@ -184,7 +184,13 @@ public class FixedPagesStrategy implements PageChangeStrategy {
 		if ( pageOffsets.size() < 1 ) {
 			return null;
 		} else if ( page >= pageOffsets.size() -1 ) {
-			return this.text.subSequence(pageOffsets.get(pageOffsets.size() -1), text.length() );
+            int startOffset = pageOffsets.get(pageOffsets.size() -1);
+
+            if ( startOffset >= 0 && startOffset <= text.length() -1 ) {
+			    return this.text.subSequence(startOffset, text.length() );
+            } else {
+                return text;
+            }
 		} else {
 			int start = this.pageOffsets.get(page);
 			int end = this.pageOffsets.get(page +1 );
@@ -206,6 +212,11 @@ public class FixedPagesStrategy implements PageChangeStrategy {
 	}
 
     public int getTopLeftPosition() {
+
+        if ( pageOffsets.isEmpty() ) {
+            return 0;
+        }
+
         if ( this.pageNum >= this.pageOffsets.size() ) {
             return this.pageOffsets.get( this.pageOffsets.size() -1 );
         }

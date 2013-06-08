@@ -157,6 +157,12 @@
     <string name="search_results_item">Search results…</string>
     <string name="lookup_wiktionary">Search on Wiktionary</string>
 
+    <string name="no_search_results">Your search yielded no results.</string>
+
+    <string name="dead_link">Sorry, it looks like the link you clicked is broken.</string>
+    <string name="could_not_load">Could not load text: %s</string>
+    <string name="out_of_memory">Sorry, PageTurner could not free enough memory to load this file.</string>
+
 
     <!-- Preferences -->
 
